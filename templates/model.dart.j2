@@ -1,0 +1,24 @@
+import 'package:json_annotation/json_annotation.dart';
+
+part '{{ class_name }}.g.dart';
+
+@JsonSerializable()
+class {{ class_name }} {
+  {% for field in fields %}
+  {% if field.required %}
+  @JsonKey(required: true)
+  {% endif %}
+  final {{ field.type }} {{ field.name }};
+  {% endfor %}
+
+  {{ class_name }}({
+    {% for field in fields %}
+    required this.{{ field.name }},
+    {% endfor %}
+  });
+
+  factory {{ class_name }}.fromJson(Map<String, dynamic> json) =>
+      _${{ class_name }}FromJson(json);
+
+  Map<String, dynamic> toJson() => _${{ class_name }}ToJson(this);
+} 
