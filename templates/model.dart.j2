@@ -1,24 +1,44 @@
-import 'package:json_annotation/json_annotation.dart';
+import 'dart:convert';
+import 'package:logging/logging.dart';
 
-part '{{ class_name }}.g.dart';
+final _logger = Logger('{{ class_name }}');
 
-@JsonSerializable()
 class {{ class_name }} {
   {% for field in fields %}
-  {% if field.required %}
-  @JsonKey(required: true)
-  {% endif %}
   final {{ field.type }} {{ field.name }};
   {% endfor %}
 
   {{ class_name }}({
     {% for field in fields %}
-    required this.{{ field.name }},
+    {% if field.required %}required {% endif %}this.{{ field.name }},
     {% endfor %}
   });
 
-  factory {{ class_name }}.fromJson(Map<String, dynamic> json) =>
-      _${{ class_name }}FromJson(json);
+  Map<String, dynamic> toJson() {
+    _logger.fine('Converting {{ class_name }} to JSON');
+    return {
+      {% for field in fields %}
+      '{{ field.name }}': {{ field.name }},
+      {% endfor %}
+    };
+  }
 
-  Map<String, dynamic> toJson() => _${{ class_name }}ToJson(this);
+  factory {{ class_name }}.fromJson(Map<String, dynamic> json) {
+    _logger.fine('Creating {{ class_name }} from JSON');
+    return {{ class_name }}(
+      {% for field in fields %}
+      {{ field.name }}: json['{{ field.name }}'] as {{ field.type }},
+      {% endfor %}
+    );
+  }
+
+  String toJsonString() {
+    _logger.fine('Converting {{ class_name }} to JSON string');
+    return jsonEncode(toJson());
+  }
+  
+  factory {{ class_name }}.fromJsonString(String jsonString) {
+    _logger.fine('Creating {{ class_name }} from JSON string');
+    return {{ class_name }}.fromJson(jsonDecode(jsonString));
+  }
 } 

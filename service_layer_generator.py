@@ -3,6 +3,7 @@ import os
 from typing import Dict, List, Any
 from jinja2 import Environment, FileSystemLoader
 import re
+import requests
 
 class ServiceLayerGenerator:
     def __init__(self, openapi_spec_path: str, output_dir: str):
@@ -14,9 +15,65 @@ class ServiceLayerGenerator:
     def _load_spec(self) -> Dict:
         """Load and validate OpenAPI specification."""
         try:
-            with open(self.openapi_spec_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            # Check if the input is a URL
+            if self.openapi_spec_path.startswith(('http://', 'https://')):
+                # Handle FastAPI's default Swagger UI URL
+                if '/docs' in self.openapi_spec_path:
+                    self.openapi_spec_path = self.openapi_spec_path.replace('/docs', '/openapi.json')
+                elif not self.openapi_spec_path.endswith('.json'):
+                    self.openapi_spec_path = self.openapi_spec_path.rstrip('/') + '/openapi.json'
+                
+                print(f"Fetching OpenAPI spec from: {self.openapi_spec_path}")
+                response = requests.get(self.openapi_spec_path)
+                response.raise_for_status()
+                
+                # Print response headers and content type for debugging
+                print(f"Response headers: {dict(response.headers)}")
+                print(f"Content type: {response.headers.get('content-type', 'unknown')}")
+                
+                # Try to decode the response content
+                try:
+                    content = response.text
+                    print(f"Response content preview: {content[:1000]}...")  # Print first 1000 chars
+                    spec = json.loads(content)
+                except json.JSONDecodeError as e:
+                    print(f"JSON decode error at line {e.lineno}, column {e.colno}")
+                    print(f"Error message: {str(e)}")
+                    print(f"Response content: {content[:2000]}...")  # Print first 2000 chars for debugging
+                    raise Exception(f"Invalid JSON response from URL: {str(e)}")
+            else:
+                with open(self.openapi_spec_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    print(f"File content preview: {content[:1000]}...")  # Print first 1000 chars
+                    try:
+                        spec = json.loads(content)
+                    except json.JSONDecodeError as e:
+                        print(f"JSON decode error at line {e.lineno}, column {e.colno}")
+                        print(f"Error message: {str(e)}")
+                        print(f"File content: {content[:2000]}...")  # Print first 2000 chars for debugging
+                        raise Exception(f"Invalid JSON in file: {str(e)}")
+
+            # Handle different OpenAPI versions
+            version = spec.get('openapi') or spec.get('swagger')
+            
+            if version:
+                print(f"Detected OpenAPI/Swagger version: {version}")
+                # OpenAPI 3.x or Swagger 2.x
+                return spec
+            else:
+                # Try to detect if it's a FastAPI Swagger UI response
+                if isinstance(spec, dict) and 'paths' in spec:
+                    print("Detected FastAPI Swagger format")
+                    return spec
+                else:
+                    print(f"Available keys in spec: {list(spec.keys())}")
+                    raise Exception(f"Unsupported OpenAPI/Swagger format. Spec keys: {list(spec.keys())}")
+
+        except requests.exceptions.RequestException as e:
+            print(f"Request error: {str(e)}")
+            raise Exception(f"Failed to fetch OpenAPI spec from URL: {str(e)}")
         except Exception as e:
+            print(f"General error: {str(e)}")
             raise Exception(f"Failed to load OpenAPI spec: {str(e)}")
 
     def _sanitize_name(self, name: str) -> str:
@@ -33,6 +90,12 @@ class ServiceLayerGenerator:
         if not schema:
             return 'dynamic'
             
+        # Handle references
+        if '$ref' in schema:
+            ref_path = schema['$ref'].split('/')
+            ref_name = ref_path[-1]
+            return self._sanitize_name(ref_name)
+            
         type_mapping = {
             'string': 'String',
             'integer': 'int',
@@ -41,6 +104,12 @@ class ServiceLayerGenerator:
             'array': 'List',
             'object': 'Map<String, dynamic>',
         }
+        
+        # Handle nullable types
+        if schema.get('nullable', False):
+            base_type = schema.get('type', 'object')
+            dart_type = type_mapping.get(base_type, 'dynamic')
+            return f'{dart_type}?'
         
         base_type = schema.get('type', 'object')
         dart_type = type_mapping.get(base_type, 'dynamic')
@@ -52,8 +121,14 @@ class ServiceLayerGenerator:
             
         return dart_type
 
-    def _generate_model_class(self, name: str, schema: Dict) -> str:
+    def _generate_model_class(self, name: str, schema: Dict, is_request: bool = False) -> str:
         """Generate Dart model class from schema."""
+        # Handle references
+        if '$ref' in schema:
+            ref_path = schema['$ref'].split('/')
+            ref_name = ref_path[-1]
+            return self._generate_model_class(ref_name, self._resolve_reference(ref_path), is_request)
+            
         properties = schema.get('properties', {})
         required = schema.get('required', [])
         
@@ -73,6 +148,52 @@ class ServiceLayerGenerator:
             fields=fields
         )
 
+    def _generate_request_model(self, operation: Dict, path: str, method: str) -> str:
+        """Generate request model for an operation."""
+        request_body = operation.get('requestBody', {})
+        if not request_body:
+            return 'dynamic'
+            
+        content = request_body.get('content', {})
+        schema = content.get('application/json', {}).get('schema', {})
+        
+        if not schema:
+            return 'dynamic'
+            
+        # Generate a unique name for the request model
+        model_name = f"{method.upper()}{self._sanitize_name(path)}Request"
+        model_content = self._generate_model_class(model_name, schema, True)
+        
+        # Save the model file
+        models_dir = os.path.join(self.output_dir, 'models')
+        model_file = os.path.join(models_dir, f"{model_name}.dart")
+        with open(model_file, 'w', encoding='utf-8') as f:
+            f.write(model_content)
+            
+        return model_name
+
+    def _generate_response_model(self, operation: Dict, path: str, method: str) -> str:
+        """Generate response model for an operation."""
+        responses = operation.get('responses', {})
+        success_response = responses.get('200', {})
+        content = success_response.get('content', {})
+        schema = content.get('application/json', {}).get('schema', {})
+        
+        if not schema:
+            return 'dynamic'
+            
+        # Generate a unique name for the response model
+        model_name = f"{method.upper()}{self._sanitize_name(path)}Response"
+        model_content = self._generate_model_class(model_name, schema, False)
+        
+        # Save the model file
+        models_dir = os.path.join(self.output_dir, 'models')
+        model_file = os.path.join(models_dir, f"{model_name}.dart")
+        with open(model_file, 'w', encoding='utf-8') as f:
+            f.write(model_content)
+            
+        return model_name
+
     def _generate_api_service(self, paths: Dict) -> str:
         """Generate Dart API service class."""
         endpoints = []
@@ -81,26 +202,19 @@ class ServiceLayerGenerator:
             for method, operation in methods.items():
                 operation_id = operation.get('operationId', '')
                 parameters = operation.get('parameters', [])
-                request_body = operation.get('requestBody', {})
-                responses = operation.get('responses', {})
                 
-                # Get response type
-                success_response = responses.get('200', {})
-                response_schema = success_response.get('content', {}).get('application/json', {}).get('schema', {})
-                response_type = self._get_dart_type(response_schema)
-                
-                # Get request body type
-                request_schema = request_body.get('content', {}).get('application/json', {}).get('schema', {})
-                request_type = self._get_dart_type(request_schema)
+                # Generate request and response models
+                request_model = self._generate_request_model(operation, path, method)
+                response_model = self._generate_response_model(operation, path, method)
                 
                 endpoints.append({
                     'path': path,
                     'method': method.upper(),
                     'name': self._sanitize_name(operation_id or f"{method}_{path}"),
                     'parameters': parameters,
-                    'request_type': request_type,
-                    'response_type': response_type,
-                    'has_file': self._has_file_parameter(parameters, request_body)
+                    'request_model': request_model,
+                    'response_model': response_model,
+                    'has_file': self._has_file_parameter(parameters, operation.get('requestBody', {}))
                 })
                 
         template = self.env.get_template('api_service.dart.j2')
@@ -122,16 +236,9 @@ class ServiceLayerGenerator:
         # Create output directory if it doesn't exist
         os.makedirs(self.output_dir, exist_ok=True)
         
-        # Generate models
+        # Generate models directory
         models_dir = os.path.join(self.output_dir, 'models')
         os.makedirs(models_dir, exist_ok=True)
-        
-        schemas = self.spec.get('components', {}).get('schemas', {})
-        for name, schema in schemas.items():
-            model_content = self._generate_model_class(name, schema)
-            model_file = os.path.join(models_dir, f"{self._sanitize_name(name)}.dart")
-            with open(model_file, 'w', encoding='utf-8') as f:
-                f.write(model_content)
         
         # Generate API service
         api_service_content = self._generate_api_service(self.spec.get('paths', {}))
@@ -142,7 +249,7 @@ class ServiceLayerGenerator:
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Generate Dart service layer from OpenAPI spec')
-    parser.add_argument('openapi_spec', help='Path to OpenAPI specification JSON file')
+    parser.add_argument('openapi_spec', help='Path to OpenAPI specification JSON file or URL')
     parser.add_argument('output_dir', help='Output directory for generated Dart files')
     
     args = parser.parse_args()

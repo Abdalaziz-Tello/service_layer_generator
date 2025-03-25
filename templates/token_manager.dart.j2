@@ -1,0 +1,74 @@
+import 'dart:convert';
+import 'package:shared_preferences.dart';
+import 'package:logging/logging.dart';
+
+final _logger = Logger('TokenManager');
+
+class TokenManager {
+  static const String _tokenKey = 'auth_token';
+  static const String _refreshTokenKey = 'refresh_token';
+  static const String _tokenExpiryKey = 'token_expiry';
+  
+  final SharedPreferences _prefs;
+  String? _accessToken;
+  String? _refreshToken;
+  DateTime? _tokenExpiry;
+
+  TokenManager._(this._prefs) {
+    _loadTokens();
+  }
+
+  static Future<TokenManager> getInstance() async {
+    final prefs = await SharedPreferences.getInstance();
+    return TokenManager._(prefs);
+  }
+
+  void _loadTokens() {
+    _logger.info('Loading tokens from storage');
+    _accessToken = _prefs.getString(_tokenKey);
+    _refreshToken = _prefs.getString(_refreshTokenKey);
+    final expiryMillis = _prefs.getInt(_tokenExpiryKey);
+    if (expiryMillis != null) {
+      _tokenExpiry = DateTime.fromMillisecondsSinceEpoch(expiryMillis);
+    }
+  }
+
+  Future<void> saveTokens({
+    required String accessToken,
+    String? refreshToken,
+    Duration? expiryDuration,
+  }) async {
+    _logger.info('Saving tokens to storage');
+    _accessToken = accessToken;
+    _refreshToken = refreshToken;
+    
+    if (expiryDuration != null) {
+      _tokenExpiry = DateTime.now().add(expiryDuration);
+    }
+
+    await Future.wait([
+      _prefs.setString(_tokenKey, accessToken),
+      if (refreshToken != null) _prefs.setString(_refreshTokenKey, refreshToken),
+      if (_tokenExpiry != null) _prefs.setInt(_tokenExpiryKey, _tokenExpiry!.millisecondsSinceEpoch),
+    ]);
+  }
+
+  Future<void> clearTokens() async {
+    _logger.info('Clearing tokens from storage');
+    _accessToken = null;
+    _refreshToken = null;
+    _tokenExpiry = null;
+
+    await Future.wait([
+      _prefs.remove(_tokenKey),
+      _prefs.remove(_refreshTokenKey),
+      _prefs.remove(_tokenExpiryKey),
+    ]);
+  }
+
+  String? get accessToken => _accessToken;
+  String? get refreshToken => _refreshToken;
+  bool get hasValidToken => _accessToken != null && 
+      (_tokenExpiry == null || _tokenExpiry!.isAfter(DateTime.now()));
+  bool get hasRefreshToken => _refreshToken != null;
+} 
